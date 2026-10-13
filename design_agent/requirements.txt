@@ -1,0 +1,4 @@
+# Additional dependencies for the design_agent module (AeroSandbox itself comes from `pip install -e .`)
+openai>=1.50
+pydantic>=2.6
+pytest>=8
