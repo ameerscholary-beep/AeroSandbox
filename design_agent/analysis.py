@@ -49,6 +49,21 @@ def is_symbolic(value: Any) -> bool:
     return bool(np.determine_type.is_casadi_type(value))
 
 
+def _is_nan(value: Any) -> bool:
+    try:
+        return bool(np.isnan(value))
+    except TypeError:
+        return False
+
+
+class _nullctx:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *exc):
+        return False
+
+
 def scalar(value: Any) -> float:
     """Extract a Python float from a numeric or 0/1-d symbolic value."""
     return float(np.asarray(value).ravel()[0])
@@ -95,7 +110,7 @@ class AnalysisResult:
     v_stall: Any  # m/s, sea level, at CLmax
     thrust_cruise: Any  # N available at cruise
     excess_power_sl: Any  # W available minus required, sea level
-    confidence: Any  # min NeuralFoil analysis_confidence over the CLmax sweep
+    confidence: Any | None  # min NeuralFoil analysis_confidence (numeric path only)
     modes: dict[str, dict[str, Any]] | None = None  # numeric only
 
     @property
@@ -109,6 +124,7 @@ def analyze(
     alphas: dict[str, Any] | None = None,
     weight_n: Any | None = None,
     compute_modes: bool | None = None,
+    lut: "PolarLUT | None" = None,
 ) -> AnalysisResult:
     """
     Analyze one design point.
@@ -125,6 +141,10 @@ def analyze(
         numeric fixed-point closure is performed instead.
     compute_modes : bool | None
         Estimate dynamic modes (numeric only). Auto-decided if None.
+    lut : PolarLUT | None
+        Polar look-up table used to give the *symbolic* problem correct section
+        aerodynamics (see ``polar_lut.py`` — NeuralFoil's own CasADi path is not
+        trustworthy). Numeric analysis needs no LUT.
     """
     alphas = alphas or {}
     airplane = design.to_airplane()
@@ -164,31 +184,39 @@ def analyze(
             )
         ),
     )
-    aero = asb.AeroBuildup(airplane=airplane, op_point=op_all).run_with_stability_derivatives()
+    from design_agent.polar_lut import patched_airfoil_aero
 
+    cm = patched_airfoil_aero(lut) if lut is not None else _nullctx()
+    with cm:
+        aero = asb.AeroBuildup(
+            airplane=airplane, op_point=op_all
+        ).run_with_stability_derivatives()
+
+        # ---- NeuralFoil CLmax sweep (root section); confidence numeric-only ----
+        atmo_c = op_cruise.atmosphere
+        re_root = (
+            atmo_c.density() * spec.cruise_speed_mps * design.root_chord
+            / atmo_c.dynamic_viscosity()
+        )
+        mach = spec.cruise_speed_mps / atmo_c.speed_of_sound()
+        sweep = design.airfoil().get_aero_from_neuralfoil(
+            alpha=np.linspace(-5, 20, SWEEP_N_ALPHA),
+            Re=re_root,
+            mach=mach,
+            model_size="large",
+        )
+    cl_max_2d = np.max(sweep["CL"])
+    raw_conf = np.min(sweep["analysis_confidence"])
+    confidence = None if _is_nan(raw_conf) else raw_conf
+    cl_max_3d = CLMAX_3D_FACTOR * cl_max_2d
+
+    # ---- Derived quantities ----
     d_cruise = aero["D"][0]
     d_sea = aero["D"][2]
     ld_ratio = aero["L"][0] / d_cruise
 
     # ---- Mass ----
     mass = _mass_model(design, spec, airplane, aero, op_cruise, ld_ratio, weight_n)
-
-    # ---- NeuralFoil CLmax + confidence sweep (root section) ----
-    atmo_c = op_cruise.atmosphere
-    re_root = (
-        atmo_c.density() * spec.cruise_speed_mps * design.root_chord
-        / atmo_c.dynamic_viscosity()
-    )
-    mach = spec.cruise_speed_mps / atmo_c.speed_of_sound()
-    sweep = design.airfoil().get_aero_from_neuralfoil(
-        alpha=np.linspace(-5, 20, SWEEP_N_ALPHA),
-        Re=re_root,
-        mach=mach,
-        model_size="large",
-    )
-    cl_max_2d = np.max(sweep["CL"])
-    confidence = np.min(sweep["analysis_confidence"])
-    cl_max_3d = CLMAX_3D_FACTOR * cl_max_2d
 
     v_stall = np.sqrt(
         2 * mass.total * G
@@ -211,7 +239,9 @@ def analyze(
         }
         mp = asb.MassProperties(
             mass=scalar(mass.total),
-            xyz_cg=[scalar(c) for c in airplane.xyz_ref],
+            x_cg=scalar(airplane.xyz_ref[0]),
+            y_cg=0.0,
+            z_cg=0.0,
             Ixx=0.08 * scalar(mass.total) * (design.span / 2) ** 2,
             Iyy=0.10 * scalar(mass.total) * design.fuselage_length ** 2,
             Izz=0.14 * scalar(mass.total) * design.fuselage_length ** 2,

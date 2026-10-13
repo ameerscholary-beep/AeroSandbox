@@ -132,13 +132,23 @@ class DesignVector:
     def from_flat(
         cls, arr: np.ndarray, frozen_airfoil: str | None = None
     ) -> "DesignVector":
-        arr = np.asarray(arr, dtype=float).ravel()
+        # Numeric fast path; symbolic (CasADi) blocks are kept as-is.
+        try:
+            flat = np.asarray(arr, dtype=float).ravel()
+            symbolic = False
+        except (TypeError, ValueError, AttributeError):
+            flat = arr
+            symbolic = True
         values: dict[str, np.ndarray | float] = {}
         i = 0
         for s in cls.field_specs(frozen_airfoil):
-            block = arr[i : i + s.size]
+            block = flat[i : i + s.size]
             i += s.size
-            values[s.name] = block if s.size > 1 else float(block[0])
+            if s.size > 1:
+                values[s.name] = block
+            else:
+                b0 = block[0]
+                values[s.name] = b0 if symbolic else float(b0)
         return cls(**_seed_airfoil_fields(values, frozen_airfoil))
 
     def clamp(self) -> "DesignVector":
