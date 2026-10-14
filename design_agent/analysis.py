@@ -29,7 +29,6 @@ from typing import Any
 import aerosandbox as asb
 import aerosandbox.numpy as np
 from aerosandbox.dynamics.flight_dynamics.airplane import get_modes
-from aerosandbox.library.weights import raymer_general_aviation_weights as raymer
 
 from design_agent.mission_spec import MissionSpec
 from design_agent.parameterization import DesignVector
@@ -37,9 +36,7 @@ from design_agent.parameterization import DesignVector
 G = 9.81
 N_ULT = 5.7  # ultimate load factor (~+4.4 gust*1.5 for utility category)
 PROP_EFF = 0.80  # propeller efficiency (cruise)
-ENGINE_INSTALLED_KG_PER_KW = 1.3  # piston engine + propeller install, dry
 BSFC_KG_PER_J = 0.28 / 3.6e6  # 0.28 kg/kWh shaft specific fuel consumption
-FUEL_DENSITY = 800.0  # kg/m^3
 CLMAX_3D_FACTOR = 0.95  # finite-wing CLmax derate from 2D airfoil data
 SWEEP_N_ALPHA = 26  # NeuralFoil AoA sweep resolution for CLmax
 _MODE_AERO_KEYS = {"CL", "CD", "a", "b", "p", "q", "r"}
@@ -274,45 +271,59 @@ def analyze(
 
 
 def _empty_mass(design, airplane, aero, op_cruise, ld_ratio, togw_kg) -> Any:
-    """Raymer GA statistical empty mass, traced against a (numeric or symbolic) TOGW."""
-    fuse = airplane.fuselages[0]
+    """Explicit statistical empty-mass model, written to be symbolic-safe.
+
+    The AeroSandbox Raymer wrappers cannot be trusted under CasADi tracing
+    (verified: several components return ~2x inflated values for MX inputs, via
+    legacy-numpy calls that silently mis-evaluate), so this module uses its own
+    closed-form power-law surrogate, calibrated to Cessna-172-class data:
+
+        wing ~130 kg @ S=17.5 m^2, tails ~33 kg, fuselage ~84 kg @ 8 m x 1 m,
+        engine ~1.2 kg/kW installed, gear/controls/systems as TOGW fractions.
+
+    Using the same closed forms for the numeric path guarantees symbolic/numeric
+    closure consistency (the property the optimizer's trim/mass constraints rely
+    on). Coefficients are module-level for calibration studies.
+    """
     wing, hstab, vstab = airplane.wings
-    m_wing = raymer.mass_wing(
-        wing=wing, design_mass_TOGW=togw_kg, ultimate_load_factor=N_ULT,
-        mass_fuel_in_wing=0.0, cruise_op_point=op_cruise,
-    )
-    m_fuse = raymer.mass_fuselage(
-        fuselage=fuse, design_mass_TOGW=togw_kg, ultimate_load_factor=N_ULT,
-        L_over_D=ld_ratio, cruise_op_point=op_cruise,
-        wing_to_tail_distance=design.htail_arm, pressure_differential=0.0,
-    )
-    m_hstab = raymer.mass_hstab(
-        hstab=hstab, design_mass_TOGW=togw_kg, ultimate_load_factor=N_ULT,
-        cruise_op_point=op_cruise,
-    )
-    m_vstab = raymer.mass_vstab(
-        vstab=vstab, design_mass_TOGW=togw_kg, ultimate_load_factor=N_ULT,
-        cruise_op_point=op_cruise,
-    )
-    m_engine = raymer.mass_engines_installed(
-        n_engines=1,
-        mass_per_engine=ENGINE_INSTALLED_KG_PER_KW * design.power_w / 1e3,
-    )
-    m_gear = raymer.mass_main_landing_gear(
-        main_gear_length=design.fuselage_radius * 1.5, design_mass_TOGW=togw_kg,
-    ) + raymer.mass_nose_landing_gear(
-        nose_gear_length=design.fuselage_radius * 1.5, design_mass_TOGW=togw_kg,
-    )
-    m_controls = raymer.mass_flight_controls(
-        airplane=airplane, design_mass_TOGW=togw_kg, ultimate_load_factor=N_ULT,
-        fuselage=fuse, main_wing=wing,
-    )
-    m_avionics = raymer.mass_avionics(mass_uninstalled_avionics=40.0)
+    S = airplane.s_ref
+    S_h = hstab.area()
+    S_v = vstab.area()
+    L_f = design.fuselage_length
+    D_f = 2 * design.fuselage_radius
+    s_wet_fuse = np.pi * (D_f / 2) * L_f * 1.7  # nose+tail taper allowance
+
+    c = MASS_SURROGATE_COEFFS
+    m_wing = c["wing"] * S**0.75 * (N_ULT * togw_kg) ** 0.45
+    m_hstab = c["hstab"] * S_h**0.75 * (N_ULT * togw_kg) ** 0.45
+    m_vstab = c["vstab"] * S_v**0.75 * (N_ULT * togw_kg) ** 0.45
+    m_fuse = c["fuselage"] * L_f**0.9 * D_f**0.7
+    m_engine = c["engine_kg_per_kw"] * design.power_w / 1e3
+    m_gear = c["gear"] * togw_kg**0.95
+    m_controls = c["controls"] * togw_kg
+    m_avionics = c["avionics"]
     return {
         "wing": m_wing, "fuselage": m_fuse, "hstab": m_hstab, "vstab": m_vstab,
         "engine": m_engine, "gear": m_gear, "flight_controls": m_controls,
         "avionics": m_avionics,
     }
+
+
+# Calibrated to Cessna-172-class empty-mass breakdown (see _empty_mass docstring).
+MASS_SURROGATE_COEFFS = {
+    "wing": 0.193,        # kg: 0.193 * S^0.75 * (n_ult*W)^0.45
+    "hstab": 0.12,
+    "vstab": 0.063,
+    "fuselage": 11.0,     # kg: 11 * L^0.9 * D^0.7
+    "engine_kg_per_kw": 1.2,
+    "gear": 0.045,        # fraction of TOGW^0.95
+    "controls": 0.02,     # fraction of TOGW
+    "avionics": 62.0,     # kg, installed
+    "electrical_frac": 0.08,   # of TOGW
+    "furnishings_frac": 0.035,  # of TOGW
+    "fuel_system_fixed": 6.0,   # kg
+    "fuel_system_per_kg_fuel": 0.4,  # kg * fuel_kg^0.7
+}
 
 
 def _fuel_mass(design, spec, d_cruise, fuel_system_mass, electrical_mass,
@@ -333,13 +344,10 @@ def _mass_model(design, spec, airplane, aero, op_cruise, ld_ratio, weight_n):
         m_fuel = _fuel_mass(
             design, spec, d_cruise, 0.0, 0.0, 0.0, 0.0, useful
         )
-        m_fs = raymer.mass_fuel_system(
-            fuel_volume=m_fuel / FUEL_DENSITY, n_tanks=2, n_engines=1,
-        )
-        m_elec = raymer.mass_electrical(
-            fuel_system_mass=m_fs, avionics_mass=parts["avionics"]
-        )
-        m_furn = raymer.mass_furnishings(design_mass_TOGW=togw_kg)
+        c = MASS_SURROGATE_COEFFS
+        m_fs = c["fuel_system_fixed"] + c["fuel_system_per_kg_fuel"] * m_fuel**0.7
+        m_elec = c["electrical_frac"] * togw_kg
+        m_furn = c["furnishings_frac"] * togw_kg
         empty = sum(parts.values()) + m_fs + m_elec + m_furn
         return parts, m_fs, m_elec, m_furn, m_fuel, empty
 

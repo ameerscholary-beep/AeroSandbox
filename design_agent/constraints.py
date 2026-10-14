@@ -32,7 +32,7 @@ class Margins:
     thrust: float = 1.20  # T_available >= thrust * D_cruise
     static_min: float = 0.05  # static margin lower bound (fraction of MAC)
     static_max: float = 0.25  # static margin upper bound
-    tofl_usage: float = 0.80  # predicted ground roll <= tofl_usage * limit
+    tofl_usage: float = 0.65  # surrogate ground roll <= tofl_usage * limit
     zeta_short_period: float = 0.30
     zeta_dutch_roll: float = 0.08
     zeta_phugoid: float = 0.04
@@ -45,7 +45,7 @@ class Margins:
     FLOOR_STATIC_MIN = 0.03
     FLOOR_THRUST = 1.05
     FLOOR_CL = 0.95
-    FLOOR_TOFL_USAGE = 0.95
+    FLOOR_TOFL_USAGE = 0.85
     FLOOR_ZETA_FACTOR = 0.7
 
     def clamped(self) -> "Margins":
@@ -101,22 +101,27 @@ def takeoff_ground_roll(res: AnalysisResult, margins: Margins) -> Any:
 def register_symbolic(
     opti: asb.Opti, res: AnalysisResult, weight_n: Any, margins: Margins
 ) -> None:
-    """Attach the full in-Opti constraint set to the optimization problem."""
+    """Attach the full in-Opti constraint set, normalized to O(1) for IPOPT."""
     W = weight_n
     sm = (res.aero["x_np"][0] - res.airplane.xyz_ref[0]) / res.airplane.c_ref
 
-    opti.subject_to(res.aero["L"][0] == W)  # cruise trim
-    opti.subject_to(res.aero["L"][1] == W)  # loiter trim
+    # Trim + mass closure: normalized residuals.
+    opti.subject_to((res.aero["L"][0] - W) / W == 0)  # cruise trim
+    opti.subject_to((res.aero["L"][1] - W) / W == 0)  # loiter trim
+    opti.subject_to((weight_n - res.mass.total * G) / (res.mass.total * G) == 0)
+    # Moment trim and stiffness.
     opti.subject_to(res.aero["Cm"][0] <= margins.cm_trim)
     opti.subject_to(res.aero["Cm"][0] >= -margins.cm_trim)
+    opti.subject_to(res.aero["Cma"][0] <= -0.05)  # pitch stiffness floor (1/rad)
+    # Lift/stall, propulsion, climb — ratio form.
     opti.subject_to(res.cl_op <= margins.cl_operating * res.cl_max_3d)
-    opti.subject_to(res.thrust_cruise >= margins.thrust * res.aero["D"][0])
+    opti.subject_to(res.thrust_cruise / res.aero["D"][0] >= margins.thrust)
     opti.subject_to(
-        res.excess_power_sl >= res.mass.total * G * res.spec.climb_rate_min_mps
+        res.excess_power_sl / (res.mass.total * G * res.spec.climb_rate_min_mps) >= 1.0
     )
+    # Stability.
     opti.subject_to(sm <= margins.static_max)
     opti.subject_to(sm >= margins.static_min)
-    opti.subject_to(res.aero["Cma"][0] <= -1e-3)  # pitch stiffness
     if res.confidence is not None:
         opti.subject_to(res.confidence >= 0.90)  # NeuralFoil epistemic gate
     mach = res.spec.cruise_speed_mps / res.op_points["cruise"].atmosphere.speed_of_sound()
@@ -125,8 +130,8 @@ def register_symbolic(
         opti.subject_to(res.v_stall <= res.spec.stall_speed_max_mps)
     if res.spec.max_takeoff_distance_m is not None:
         opti.subject_to(
-            takeoff_ground_roll(res, margins)
-            <= margins.tofl_usage * res.spec.max_takeoff_distance_m
+            takeoff_ground_roll(res, margins) / res.spec.max_takeoff_distance_m
+            <= margins.tofl_usage
         )
 
 

@@ -11,7 +11,7 @@ see *why* it failed instead of getting an exception.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import aerosandbox as asb
@@ -92,7 +92,7 @@ def build_opti(
     register_symbolic(opti, res, weight_n, margins)
     opti.subject_to(weight_n == res.mass.total * G)  # mass closure
     opti.minimize(res.mass.total)
-    return opti, flat_vars, weight_n, res
+    return opti, flat_vars, weight_n, alphas
 
 
 def optimize(
@@ -122,14 +122,39 @@ def optimize(
         outer_iterations = 1 if frozen_airfoil is not None else 3
 
     result: OptimizationResult | None = None
+    working_margins = margins
+    mode_repair_budget = 2
     for _outer in range(outer_iterations):
         lut = PolarLUT(design.airfoil())
         result = _solve_once(
-            spec, design, margins, lut, max_runtime=max_runtime, max_iter=max_iter
+            spec, design, working_margins, lut,
+            max_runtime=max_runtime, max_iter=max_iter,
         )
         design = result.design
         if frozen_airfoil is not None:
             break
+    # Dynamic-mode feedback: damping is checked numerically (modes are numeric-only
+    # by design); if the optimum is lightly damped, stiffen the static-margin
+    # requirement and re-solve. Bounded; floors still apply via clamped margins.
+    while (
+        result is not None
+        and not result.success
+        and mode_repair_budget > 0
+        and any(r.name in ("zeta_short_period", "zeta_dutch_roll") and not r.passed
+                for r in result.records)
+    ):
+        mode_repair_budget -= 1
+        working_margins = replace(
+            working_margins, static_min=max(working_margins.static_min, 0.12)
+        ).clamped()
+        lut = PolarLUT(design.airfoil())
+        retried = _solve_once(
+            spec, design, working_margins, lut,
+            max_runtime=max_runtime, max_iter=max_iter,
+        )
+        if retried.mass_total_kg <= result.mass_total_kg * 1.5:
+            result = retried
+            design = retried.design
     assert result is not None
     return result
 
@@ -143,7 +168,7 @@ def _solve_once(
     max_iter: int,
 ) -> OptimizationResult:
     t0 = time.time()
-    opti, flat_vars, weight_n, _res = build_opti(spec, x0, margins, lut=lut)
+    opti, flat_vars, weight_n, alphas = build_opti(spec, x0, margins, lut=lut)
     build_time = time.time() - t0
 
     sol = None
@@ -174,7 +199,8 @@ def _solve_once(
         [np.asarray(sol(v), dtype=float).ravel() for v in flat_vars]
     )
     design = DesignVector.from_flat(flat_num, frozen_airfoil=x0.frozen_airfoil)
-    numeric = analyze(design, spec)  # true NeuralFoil: fixed-point mass + modes
+    alpha_num = {k: scalar(sol(v)) for k, v in alphas.items()}
+    numeric = analyze(design, spec, alphas=alpha_num)  # true NF, fixed-point mass
     records = evaluate_numeric(numeric, margins)
     success = all_passed(records)
     if not success:

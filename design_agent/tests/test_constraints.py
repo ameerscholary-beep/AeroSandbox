@@ -22,7 +22,7 @@ def test_margins_floors():
     assert m.static_min == 0.03
     assert m.thrust == 1.05
     assert m.cl_operating == 0.95
-    assert m.tofl_usage == 0.95
+    assert m.tofl_usage == 0.85
     assert m.zeta_short_period == 0.30 * 0.7
 
 

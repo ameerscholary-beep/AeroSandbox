@@ -102,7 +102,7 @@ class DesignVector:
             FieldSpec("taper", 0.2, 1.0, 0.6),
             FieldSpec("sweep_qc_deg", 0.0, 25.0, 10.0),
             FieldSpec("twist_tip_deg", -5.0, 3.0, 1.0),
-            FieldSpec("dihedral_deg", 0.0, 10.0, 3.0),
+            FieldSpec("dihedral_deg", 1.5, 10.0, 3.0),
         ]
         if frozen_airfoil is None:
             base += cls._airfoil_specs()

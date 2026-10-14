@@ -101,11 +101,21 @@ def _is_casadi(value: Any) -> bool:
     return isinstance(value, (cas.MX, cas.SX, cas.DM))
 
 
-def _as_casadi(value: Any) -> Any:
-    if _is_casadi(value):
-        return value
-    arr = np.asarray(value, dtype=float)
-    return cas.DM(arr.ravel())
+def _vec(value: Any) -> Any:
+    """Column-vector (casadi) or 1-d float array."""
+    if isinstance(value, (cas.MX, cas.SX, cas.DM)):
+        v = cas.vec(value)
+        return v
+    return np.atleast_1d(np.asarray(value, dtype=float).ravel())
+
+
+def _bc(v: Any, n: int) -> Any:
+    """Broadcast a length-1 column to length n."""
+    if v.shape[0] == n:
+        return v
+    if isinstance(v, (cas.MX, cas.SX, cas.DM)):
+        return cas.repmat(v, n) if v.shape[0] == 1 else v
+    return np.repeat(v, n) if v.shape[0] == 1 else v
 
 
 @contextmanager
