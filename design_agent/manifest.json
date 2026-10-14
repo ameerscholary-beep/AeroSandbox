@@ -1,0 +1,235 @@
+{
+  "mission": {
+    "role": "Design a 4-seat piston trainer",
+    "config": "conventional",
+    "propulsion": "piston",
+    "payload_mass_kg": 340.0,
+    "crew_count": 1,
+    "crew_mass_kg": 90.0,
+    "range_m": 800000.0,
+    "cruise_speed_mps": 60.0,
+    "cruise_altitude_m": 3000.0,
+    "max_takeoff_distance_m": 600.0,
+    "stall_speed_max_mps": 30.0,
+    "endurance_reserve_min": 20.0,
+    "climb_rate_min_mps": 5.0,
+    "max_mach": null,
+    "constraints_overrides": {}
+  },
+  "success": true,
+  "mass_total_kg": 1273.6414418078843,
+  "constraints_passed": 19,
+  "constraints_total": 19,
+  "message": "solver did not converge; diagnostics from last iterate; solver stopped early (last iterate shown)",
+  "solver_stats": {
+    "converged": false,
+    "alphas": {
+      "cruise": 1.7418159486493199,
+      "loiter": 2.591666614210582,
+      "sea": 0.7808680725670916
+    },
+    "weight_n": 12494.422544135346
+  },
+  "records": [
+    {
+      "name": "trim_cruise",
+      "value": 12640.715255721347,
+      "limit": 12494.422544135346,
+      "kind": "equality",
+      "passed": true,
+      "description": "Lift = weight at cruise"
+    },
+    {
+      "name": "trim_loiter",
+      "value": 12629.902921738001,
+      "limit": 12494.422544135346,
+      "kind": "equality",
+      "passed": true,
+      "description": "Lift = weight in loiter"
+    },
+    {
+      "name": "pitch_trim",
+      "value": 0.013371609427510143,
+      "limit": 0.02,
+      "kind": "upper",
+      "passed": true,
+      "description": "|Cm| about CG at cruise within trim margin"
+    },
+    {
+      "name": "cl_margin",
+      "value": 0.16879237400030142,
+      "limit": 1.5262076686519335,
+      "kind": "upper",
+      "passed": true,
+      "description": "Operating CL <= margin * CLmax"
+    },
+    {
+      "name": "thrust_margin",
+      "value": 1338.2260158255308,
+      "limit": 1054.5573894188326,
+      "kind": "lower",
+      "passed": true,
+      "description": "Available thrust >= margin * cruise drag"
+    },
+    {
+      "name": "climb",
+      "value": 62820.369289538634,
+      "limit": 62472.112720676734,
+      "kind": "lower",
+      "passed": true,
+      "description": "Sea-level excess power for required climb rate"
+    },
+    {
+      "name": "static_margin",
+      "value": 0.24561798485921374,
+      "limit": 0.05,
+      "kind": "lower",
+      "passed": true,
+      "description": "Static margin lower bound"
+    },
+    {
+      "name": "static_margin_max",
+      "value": 0.24561798485921374,
+      "limit": 0.25,
+      "kind": "upper",
+      "passed": true,
+      "description": "Static margin upper bound"
+    },
+    {
+      "name": "pitch_stiffness",
+      "value": -2.188055715680466,
+      "limit": 0.0,
+      "kind": "upper",
+      "passed": true,
+      "description": "Cma < 0"
+    },
+    {
+      "name": "nf_confidence",
+      "value": 0.9379752749737404,
+      "limit": 0.9,
+      "kind": "lower",
+      "passed": true,
+      "description": "NeuralFoil analysis_confidence gate"
+    },
+    {
+      "name": "mach_limit",
+      "value": 0.18241870857541692,
+      "limit": 0.72,
+      "kind": "upper",
+      "passed": true,
+      "description": "Cruise Mach limit"
+    },
+    {
+      "name": "stall_speed",
+      "value": 16.196660535091173,
+      "limit": 30.0,
+      "kind": "upper",
+      "passed": true,
+      "description": "Sea-level stall speed limit"
+    },
+    {
+      "name": "takeoff_roll",
+      "value": 65.20646263274233,
+      "limit": 390.0,
+      "kind": "upper",
+      "passed": true,
+      "description": "Takeoff ground-roll surrogate within usage of limit"
+    },
+    {
+      "name": "takeoff_roll_library",
+      "value": 258.89633869927974,
+      "limit": 600.0,
+      "kind": "upper",
+      "passed": true,
+      "description": "library.field_lengths takeoff distance vs limit"
+    },
+    {
+      "name": "zeta_short_period",
+      "value": 0.3684131762769688,
+      "limit": 0.3,
+      "kind": "lower",
+      "passed": true,
+      "description": "Short-period damping"
+    },
+    {
+      "name": "zeta_dutch_roll",
+      "value": 0.5516352768520729,
+      "limit": 0.08,
+      "kind": "lower",
+      "passed": true,
+      "description": "Dutch-roll damping"
+    },
+    {
+      "name": "zeta_phugoid",
+      "value": 0.04944587384694773,
+      "limit": 0.03,
+      "kind": "lower",
+      "passed": true,
+      "description": "Phugoid damping"
+    },
+    {
+      "name": "spiral_stable",
+      "value": -3.246785442955974,
+      "limit": 0.02,
+      "kind": "upper",
+      "passed": true,
+      "description": "Spiral eigenvalue bound"
+    },
+    {
+      "name": "thickness_floor",
+      "value": 0.12157049518637011,
+      "limit": 0.09,
+      "kind": "lower",
+      "passed": true,
+      "description": "Airfoil t/c structural floor"
+    }
+  ],
+  "advice": [],
+  "steps": [
+    {
+      "phase": "parse",
+      "detail": "mission parsed: role='Design a 4-seat piston trainer', payload=340 kg",
+      "elapsed_s": 0.0012693405151367188
+    },
+    {
+      "phase": "optimize",
+      "detail": "19/19 constraints passed, mass 1274 kg",
+      "elapsed_s": 22.044954299926758
+    },
+    {
+      "phase": "diagnose",
+      "detail": "all constraints satisfied",
+      "elapsed_s": 0.0
+    }
+  ],
+  "robustness": {
+    "n_samples": 17,
+    "p_success": 0.29411764705882354,
+    "mass_percentiles": {
+      "p5": 1241.2749290950442,
+      "p50": 1306.0819049277197,
+      "p95": 1359.1057369015402
+    },
+    "pass_probability": {
+      "trim_cruise": 1.0,
+      "trim_loiter": 1.0,
+      "pitch_trim": 1.0,
+      "cl_margin": 1.0,
+      "thrust_margin": 1.0,
+      "climb": 0.4117647058823529,
+      "static_margin": 1.0,
+      "static_margin_max": 0.7647058823529411,
+      "pitch_stiffness": 1.0,
+      "nf_confidence": 1.0,
+      "mach_limit": 1.0,
+      "stall_speed": 1.0,
+      "takeoff_roll": 1.0,
+      "takeoff_roll_library": 1.0,
+      "zeta_short_period": 1.0,
+      "zeta_dutch_roll": 1.0,
+      "zeta_phugoid": 1.0,
+      "spiral_stable": 1.0,
+      "thickness_floor": 1.0
+    }
+  }
+}
