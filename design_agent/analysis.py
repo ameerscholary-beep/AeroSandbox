@@ -42,6 +42,22 @@ SWEEP_N_ALPHA = 26  # NeuralFoil AoA sweep resolution for CLmax
 _MODE_AERO_KEYS = {"CL", "CD", "a", "b", "p", "q", "r"}
 
 
+@dataclass(frozen=True)
+class Dispersion:
+    """First-order dispersion model for Monte-Carlo robustness checks.
+
+    mass_factor       multiplies the empty-mass model (weight growth).
+    density_factor    scales aero forces L/D at fixed coefficients
+                      (first-order; Re-coefficient feedback neglected).
+    temperature_offset_k  ISA deviation, exact via `asb.Atmosphere`.
+    CG dispersion is *not* handled here — perturb `cg_mac_fraction` on the
+    DesignVector instead (see uncertainty.py).
+    """
+    mass_factor: float = 1.0
+    density_factor: float = 1.0
+    temperature_offset_k: float = 0.0
+
+
 def is_symbolic(value: Any) -> bool:
     return bool(np.determine_type.is_casadi_type(value))
 
@@ -138,10 +154,12 @@ def analyze(
         numeric fixed-point closure is performed instead.
     compute_modes : bool | None
         Estimate dynamic modes (numeric only). Auto-decided if None.
-    lut : PolarLUT | None
-        Polar look-up table used to give the *symbolic* problem correct section
-        aerodynamics (see ``polar_lut.py`` — NeuralFoil's own CasADi path is not
-        trustworthy). Numeric analysis needs no LUT.
+    lut : PolarLUT | dict[str, PolarLUT] | None
+        Polar look-up table(s) used to give the *symbolic* problem correct
+        section aerodynamics (see ``polar_lut.py`` — NeuralFoil's own CasADi
+        path is not trustworthy). A name->LUT registry dispatches per airfoil;
+        a single LUT applies to all intercepted airfoils. Numeric analysis
+        needs no LUT.
     """
     alphas = alphas or {}
     airplane = design.to_airplane()
@@ -361,11 +379,16 @@ def _mass_model(design, spec, airplane, aero, op_cruise, ld_ratio, weight_n):
             empty=empty, fuel=m_fuel, useful=useful, total=total,
         )
 
-    # Numeric fixed-point closure (Raymer TOGW sensitivity is weak; 4 iterations).
+    # Numeric fixed-point closure (Raymer TOGW sensitivity is weak; iterate to
+    # a tight residual so post-solve verification doesn't see a mass gap).
     togw_kg = 2.5 * useful
-    for _ in range(4):
+    for _ in range(10):
         parts, m_fs, m_elec, m_furn, m_fuel, empty = totals(togw_kg)
-        togw_kg = useful + scalar(m_fuel) + scalar(empty)
+        togw_new = useful + scalar(m_fuel) + scalar(empty)
+        if abs(togw_new - togw_kg) <= 1e-3 * max(togw_kg, 1.0):
+            togw_kg = togw_new
+            break
+        togw_kg = togw_new
     total = useful + m_fuel + empty
     return MassBreakdown(
         **parts, fuel_system=m_fs, electrical=m_elec, furnishings=m_furn,

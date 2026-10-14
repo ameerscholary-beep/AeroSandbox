@@ -41,7 +41,7 @@ ALPHA_GRID = np.concatenate(
     [np.linspace(-10.0, 6.0, 17), np.linspace(6.5, 20.0, 28), [22.5, 25.0]]
 )
 RE_GRID = np.logspace(4.7, 7.7, 15)  # ~5e4 .. 5e7
-MACH_GRID = np.array([0.0, 0.15, 0.3, 0.4, 0.45, 0.5, 0.55, 0.6, 0.7])
+MACH_GRID = np.array([0.0, 0.1, 0.175, 0.25, 0.325, 0.4, 0.45, 0.5, 0.55, 0.6, 0.7])
 
 
 def _flatten_fortran(values: np.ndarray) -> np.ndarray:
@@ -70,7 +70,16 @@ class PolarLUT:
             )
 
     def evaluate(self, alpha: Any, re: Any, mach: Any = 0.0) -> dict[str, Any]:
-        """Elementwise LUT evaluation; works with floats, numpy, and CasADi MX/SX/DM."""
+        """Elementwise LUT evaluation preserving the broadcast input shape."""
+        def shape_of(value: Any) -> tuple[int, ...]:
+            if isinstance(value, (cas.MX, cas.SX, cas.DM)):
+                return tuple(int(d) for d in value.shape)
+            return tuple(np.asarray(value).shape)
+
+        target_shape = np.broadcast_shapes(
+            shape_of(alpha), shape_of(re), shape_of(mach)
+        )
+
         a = _vec(alpha)
         r = _vec(re)
         m = _vec(mach)
@@ -80,12 +89,27 @@ class PolarLUT:
         m = _bc(m, n)
         symbolic = any(isinstance(v, (cas.MX, cas.SX)) for v in (alpha, re, mach))
         out: dict[str, Any] = {}
+
         for key in ("CL", "CD", "CM"):
             interp = self._interp[key]
             col = [interp(cas.vertcat(m[i], r[i], a[i])) for i in range(n)]
-            out[key] = cas.vertcat(*col)
-        if not symbolic:
-            out = {k: np.asarray(v).ravel() for k, v in out.items()}
+            flat = cas.vertcat(*col)
+
+            if symbolic:
+                if not target_shape:
+                    out[key] = flat[0]
+                else:
+                    rows = target_shape[0]
+                    cols = (
+                        int(np.prod(target_shape[1:]))
+                        if len(target_shape) > 1
+                        else 1
+                    )
+                    out[key] = cas.reshape(flat, rows, cols)
+            else:
+                arr = np.asarray(flat)
+                out[key] = arr.reshape(target_shape) if target_shape else arr.ravel()
+
         return out
 
     @property
@@ -95,6 +119,61 @@ class PolarLUT:
             "Re": (float(RE_GRID.min()), float(RE_GRID.max())),
             "mach": (float(MACH_GRID.min()), float(MACH_GRID.max())),
         }
+
+
+_LUT_CACHE: dict[tuple[str, str], "PolarLUT"] = {}
+
+
+def build_lut_registry(
+    airfoils: list, model_size: str = "large"
+) -> "dict[str, PolarLUT]":
+    """One LUT per airfoil, keyed by airfoil name.
+
+    A full airplane references more than one airfoil (design wing airfoil plus
+    the naca0010 empennage), and routing every section through a single
+    design-airfoil LUT invents phantom tail lift. Names are sufficient keys
+    here because the airplane is always assembled by
+    `DesignVector.to_airplane`; a lookup miss raises `KeyError` loudly rather
+    than silently using wrong polars.
+    """
+    registry: dict[str, PolarLUT] = {}
+    for af in airfoils:
+        key = getattr(af, "name", None) or "airfoil"
+        if key not in registry:
+            registry[key] = PolarLUT(af, model_size=model_size)
+    return registry
+
+
+def build_design_registry(design: Any, model_size: str = "large") -> "dict[str, PolarLUT]":
+    """LUT registry for a `DesignVector`: its wing airfoil + the naca0010 tails.
+
+    For a frozen (database) airfoil the LUTs are cached: the grid never changes
+    across solves/repairs, and rebuilding costs tens of seconds. CST-shape
+    optimization (``frozen_airfoil is None``) always rebuilds, because the
+    airfoil itself is a design variable there.
+    """
+    if getattr(design, "frozen_airfoil", None) is None:
+        return build_lut_registry(
+            [design.airfoil(), asb.Airfoil("naca0010")], model_size=model_size
+        )
+    registry: dict[str, PolarLUT] = {}
+    for af in [design.airfoil(), asb.Airfoil("naca0010")]:
+        key = getattr(af, "name", None) or "airfoil"
+        cache_key = (key, model_size)
+        if cache_key not in _LUT_CACHE:
+            _LUT_CACHE[cache_key] = PolarLUT(af, model_size=model_size)
+        registry[key] = _LUT_CACHE[cache_key]
+    return registry
+
+
+def _resolve_lut(lut: Any, airfoil: Any) -> "PolarLUT | None":
+    """Single LUT (legacy), mapping by airfoil name, or callable -> LUT/None."""
+    if isinstance(lut, PolarLUT):
+        return lut
+    if callable(lut):
+        return lut(airfoil)
+    key = getattr(airfoil, "name", None) or "airfoil"
+    return lut[key]
 
 
 def _is_casadi(value: Any) -> bool:
@@ -119,9 +198,13 @@ def _bc(v: Any, n: int) -> Any:
 
 
 @contextmanager
-def patched_airfoil_aero(lut: PolarLUT):
+def patched_airfoil_aero(lut: "PolarLUT | dict[str, PolarLUT] | Any"):
     """
-    Temporarily route `Airfoil.get_aero_from_neuralfoil` through `lut`.
+    Temporarily route `Airfoil.get_aero_from_neuralfoil` through LUT(s).
+
+    `lut` may be a single `PolarLUT` (all intercepted airfoils), a
+    name->LUT mapping/registry (per-airfoil dispatch, see
+    `build_lut_registry`), or a callable `Airfoil -> PolarLUT | None`.
 
     Only calls whose alpha/Re/mach contain CasADi symbols are intercepted;
     numeric calls use the genuine NeuralFoil. `analysis_confidence` is NOT
@@ -134,7 +217,15 @@ def patched_airfoil_aero(lut: PolarLUT):
                 xtr_lower=1.0, model_size="large", control_surfaces=None,
                 include_360_deg_effects=True):
         if _is_casadi(alpha) or _is_casadi(Re) or _is_casadi(mach):
-            out = lut.evaluate(alpha=alpha, re=Re, mach=mach)
+            resolved = _resolve_lut(lut, self)
+            if resolved is None:  # unknown airfoil: genuine (broken-casadi) NF
+                return original(
+                    self, alpha=alpha, Re=Re, mach=mach, n_crit=n_crit,
+                    xtr_upper=xtr_upper, xtr_lower=xtr_lower,
+                    model_size=model_size, control_surfaces=control_surfaces,
+                    include_360_deg_effects=include_360_deg_effects,
+                )
+            out = resolved.evaluate(alpha=alpha, re=Re, mach=mach)
             # mimic the full NeuralFoil dict shape with NaN confidence
             out["analysis_confidence"] = float("nan")
             return out

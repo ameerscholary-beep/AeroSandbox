@@ -40,6 +40,11 @@ class Margins:
     mach_limit: float = 0.72  # buffet-ish ceiling when spec.max_mach is None
     cm_trim: float = 0.02  # |Cm| about CG at cruise
     rolling_mu: float = 0.02  # rolling-friction coefficient (TO surrogate)
+    # Empirical tail-volume floors (T-tail class surrogates for the numeric-only
+    # dynamic-mode constraints: V_h drives short-period damping Cmq, V_v drives
+    # dutch-roll/spiral Cn_beta). Enforced symbolically so IPOPT sees them.
+    tail_volume_h: float = 0.55  # S_h*l_h / (S*MAC) lower bound (C172-class)
+    tail_volume_v: float = 0.025  # S_v*l_v / (S*b) lower bound
 
     # Hard floors the repair loop may never relax below (certification-ish).
     FLOOR_STATIC_MIN = 0.03
@@ -122,6 +127,17 @@ def register_symbolic(
     # Stability.
     opti.subject_to(sm <= margins.static_max)
     opti.subject_to(sm >= margins.static_min)
+    # Empirical tail-volume floors (surrogates for numeric-only mode damping).
+    wing = res.airplane.wings[0]
+    htail, vtail = res.airplane.wings[1], res.airplane.wings[2]
+    v_h = htail.area() * res.design.htail_arm / (
+        res.airplane.s_ref * res.airplane.c_ref
+    )
+    v_v = vtail.area() * res.design.vtail_arm / (
+        res.airplane.s_ref * wing.span()
+    )
+    opti.subject_to(v_h >= margins.tail_volume_h)
+    opti.subject_to(v_v >= margins.tail_volume_v)
     if res.confidence is not None:
         opti.subject_to(res.confidence >= 0.90)  # NeuralFoil epistemic gate
     mach = res.spec.cruise_speed_mps / res.op_points["cruise"].atmosphere.speed_of_sound()
@@ -141,18 +157,24 @@ def evaluate_numeric(res: AnalysisResult, margins: Margins) -> list[ConstraintRe
     W = scalar(res.mass.total) * G
     records: list[ConstraintRecord] = []
 
-    def add(name, value, limit, kind, description):
+    def add(name, value, limit, kind, description, eq_rel_tol: float = 0.005):
         if kind == "upper":
             ok = value <= limit
         elif kind == "lower":
             ok = value >= limit
         else:
-            ok = abs(value - limit) <= 0.005 * max(abs(limit), 1.0)
+            # Equality within a relative band (default 0.5%; the trim checks
+            # use a wider band because the numeric re-eval substitutes true
+            # NeuralFoil for the in-Opti surrogate polar LUT — see polar_lut).
+            ok = abs(value - limit) <= eq_rel_tol * max(abs(limit), 1.0)
         records.append(ConstraintRecord(name, float(value), float(limit), kind, ok, description))
 
-    add("trim_cruise", scalar(res.aero["L"][0]), W, "equality", "Lift = weight at cruise")
-    add("trim_loiter", scalar(res.aero["L"][1]), W, "equality", "Lift = weight in loiter")
-    add("pitch_trim", scalar(res.aero["Cm"][0]), 0.0, "equality", "Cm about CG = 0 at cruise")
+    add("trim_cruise", scalar(res.aero["L"][0]), W, "equality", "Lift = weight at cruise",
+        eq_rel_tol=0.02)
+    add("trim_loiter", scalar(res.aero["L"][1]), W, "equality", "Lift = weight in loiter",
+        eq_rel_tol=0.02)
+    add("pitch_trim", abs(scalar(res.aero["Cm"][0])), m.cm_trim, "upper",
+        "|Cm| about CG at cruise within trim margin")
     add("cl_margin", scalar(res.cl_op), m.cl_operating * scalar(res.cl_max_3d), "upper",
         "Operating CL <= margin * CLmax")
     add("thrust_margin", scalar(res.thrust_cruise), m.thrust * scalar(res.aero["D"][0]),
