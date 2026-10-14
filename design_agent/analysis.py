@@ -138,6 +138,7 @@ def analyze(
     weight_n: Any | None = None,
     compute_modes: bool | None = None,
     lut: "PolarLUT | None" = None,
+    dispersion: Dispersion | None = None,
 ) -> AnalysisResult:
     """
     Analyze one design point.
@@ -160,26 +161,39 @@ def analyze(
         path is not trustworthy). A name->LUT registry dispatches per airfoil;
         a single LUT applies to all intercepted airfoils. Numeric analysis
         needs no LUT.
+    dispersion : Dispersion | None
+        First-order dispersion (Monte-Carlo robustness, see ``uncertainty.py``):
+        scales the empty-mass model and aero forces, and shifts the atmosphere
+        off-ISA. Constant factors only — symbolic-safe. None means nominal.
     """
     alphas = alphas or {}
+    dispersion = dispersion or Dispersion()
     airplane = design.to_airplane()
 
     # ---- Operating points ----
     op_cruise = asb.OperatingPoint(
         velocity=spec.cruise_speed_mps,
         alpha=alphas.get("cruise", 2.0),
-        atmosphere=asb.Atmosphere(spec.cruise_altitude_m),
+        atmosphere=asb.Atmosphere(
+            spec.cruise_altitude_m,
+            temperature_deviation=dispersion.temperature_offset_k,
+        ),
     )
     op_loiter = asb.OperatingPoint(
         velocity=0.75 * spec.cruise_speed_mps,
         alpha=alphas.get("loiter", 2.0),
-        atmosphere=asb.Atmosphere(spec.cruise_altitude_m),
+        atmosphere=asb.Atmosphere(
+            spec.cruise_altitude_m,
+            temperature_deviation=dispersion.temperature_offset_k,
+        ),
     )
     v_sl = 1.3 * (spec.stall_speed_max_mps or 35.0)
     op_sea = asb.OperatingPoint(
         velocity=v_sl,
         alpha=alphas.get("sea", 8.0),
-        atmosphere=asb.Atmosphere(0.0),
+        atmosphere=asb.Atmosphere(
+            0.0, temperature_deviation=dispersion.temperature_offset_k
+        ),
     )
     op_points = {"cruise": op_cruise, "loiter": op_loiter, "sea": op_sea}
 
@@ -196,7 +210,8 @@ def analyze(
                     op_loiter.atmosphere.altitude,
                     op_sea.atmosphere.altitude,
                 ]
-            )
+            ),
+            temperature_deviation=dispersion.temperature_offset_k,
         ),
     )
     from design_agent.polar_lut import patched_airfoil_aero
@@ -225,17 +240,29 @@ def analyze(
     confidence = None if _is_nan(raw_conf) else raw_conf
     cl_max_3d = CLMAX_3D_FACTOR * cl_max_2d
 
+    # First-order density dispersion: scale forces at fixed coefficients
+    # (Re/coefficient feedback neglected — see Dispersion docstring).
+    aero["L"] = aero["L"] * dispersion.density_factor
+    aero["D"] = aero["D"] * dispersion.density_factor
+
     # ---- Derived quantities ----
     d_cruise = aero["D"][0]
     d_sea = aero["D"][2]
     ld_ratio = aero["L"][0] / d_cruise
 
     # ---- Mass ----
-    mass = _mass_model(design, spec, airplane, aero, op_cruise, ld_ratio, weight_n)
+    mass = _mass_model(
+        design, spec, airplane, aero, op_cruise, ld_ratio, weight_n,
+        mass_factor=dispersion.mass_factor,
+    )
 
+    atmo_sl = asb.Atmosphere(
+        0.0, temperature_deviation=dispersion.temperature_offset_k
+    )
     v_stall = np.sqrt(
         2 * mass.total * G
-        / (asb.Atmosphere(0.0).density() * airplane.s_ref * cl_max_3d)
+        / (atmo_sl.density() * dispersion.density_factor
+           * airplane.s_ref * cl_max_3d)
     )
 
     # ---- Propulsion ----
@@ -352,8 +379,13 @@ def _fuel_mass(design, spec, d_cruise, fuel_system_mass, electrical_mass,
     return 1.1 * p_shaft * t_mission * BSFC_KG_PER_J
 
 
-def _mass_model(design, spec, airplane, aero, op_cruise, ld_ratio, weight_n):
-    """Assemble the MassBreakdown, handling symbolic vs numeric closure."""
+def _mass_model(design, spec, airplane, aero, op_cruise, ld_ratio, weight_n,
+                mass_factor: float = 1.0):
+    """Assemble the MassBreakdown, handling symbolic vs numeric closure.
+
+    ``mass_factor`` scales the whole empty-mass model (weight-growth dispersion
+    for Monte-Carlo robustness); 1.0 is the nominal model.
+    """
     d_cruise = aero["D"][0]
     useful = spec.useful_load_kg
 
@@ -366,7 +398,7 @@ def _mass_model(design, spec, airplane, aero, op_cruise, ld_ratio, weight_n):
         m_fs = c["fuel_system_fixed"] + c["fuel_system_per_kg_fuel"] * m_fuel**0.7
         m_elec = c["electrical_frac"] * togw_kg
         m_furn = c["furnishings_frac"] * togw_kg
-        empty = sum(parts.values()) + m_fs + m_elec + m_furn
+        empty = mass_factor * (sum(parts.values()) + m_fs + m_elec + m_furn)
         return parts, m_fs, m_elec, m_furn, m_fuel, empty
 
     if weight_n is not None:
